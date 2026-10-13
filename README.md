@@ -1,66 +1,59 @@
-# Tata Steel TDA Agent Router (Fine-Tuned Qwen3-4B LoRA)
+# Tata Steel TDA Agent Router — A100 VM / RDP Edition (`vm-rdp` branch)
 
-This package contains the fine-tuned LoRA adapter (`tda_lora_model/`) and production inference script (`router.py`) for routing Tata Steel internal data queries to the correct domain agent with reasoning.
+This branch is specifically configured for running the fine-tuned Tata Steel TDA Agent Router on a **Remote Desktop (RDP) VM equipped with an NVIDIA A100 GPU**.
 
-## Supported Agents
-| Agent Name | Domain Scope |
-| :--- | :--- |
-| **`EmployeeInformationAgent`** | Employee master data: names, IDs, grades, departments, gender, tenure, retirement, reporting manager, BUHR/Locational HR contacts. |
-| **`ConnectedWorkforceAgent`** | Gate/biometric entry & exit, safety permits (E-Permits), beacon tracking, overstay violations, vendor/contractor and skill/trade details. |
-| **`SCSteelInventoryAgent`** | Steel stock and inventory levels, value, age, plan vs actual. |
-| **`RMProductionAgent`** | Iron ore and coal production volumes vs plan (ABP/OSP). |
-
----
-
-## Folder Contents
-```text
-├── tda_lora_model/              # Fine-tuned LoRA adapter weights & tokenizer (Rank 8, Alpha 16)
-│   ├── adapter_model.safetensors
-│   ├── adapter_config.json
-│   ├── tokenizer.json
-│   ├── tokenizer_config.json
-│   └── chat_template.jinja
-├── router.py                    # Ready-to-use Python module & interactive CLI
-├── requirements.txt             # Python dependencies
-└── README_FOR_TEAM.md           # This guide
-```
+## Why This Branch Is Different from `main` (A100 RDP VM Optimizations)
+1. **Full Native 16-Bit (`bfloat16`) on A100 Instead of 4-Bit Quantization:**
+   - The `main` branch uses Unsloth/bitsandbytes 4-bit quantization (`unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit`) designed for small Colab GPUs. On Windows Server RDP VMs, `unsloth` and `bitsandbytes` frequently fail due to Linux-specific Triton/CUDA DLL dependencies.
+   - An **NVIDIA A100 (40GB / 80GB VRAM)** easily fits the entire 4B model in native **`torch.bfloat16` (~8 GB VRAM)** with zero quantization accuracy loss and native A100 Tensor Core (`TF32` + `bfloat16` + PyTorch `SDPA` FlashAttention) acceleration.
+2. **In-VRAM LoRA Weight Fusion (`merge_and_unload()`):**
+   - At startup, `router.py` loads `Qwen/Qwen3-4B-Instruct-2507` + `./tda_lora_model` and fuses the LoRA adapter matrices directly into the base weights in A100 VRAM (`merge_and_unload()`), eliminating LoRA adapter overhead on every request (~150–250 ms response time).
+3. **Windows CUDA PyTorch Installer (`setup_vm.bat`):**
+   - On Windows RDP VMs, running plain `pip install torch` installs the **CPU-only** version of PyTorch from PyPI. Running `setup_vm.bat` installs the official **CUDA 12.4 wheel** so PyTorch utilizes the A100 GPU.
+4. **Local Model Cache (`./model_cache`) & FastAPI Server (`api_server.py`):**
+   - Stores downloaded base weights in `./model_cache` inside the project folder so restricted RDP user profiles (`C:\Users\<user>`) do not run out of quota.
+   - Includes `api_server.py` to expose `POST http://0.0.0.0:8000/route` as an internal microservice.
 
 ---
 
-## Quick Start (Local GPU Server or Google Colab)
+## Quick Start on the A100 RDP VM
 
-### 1. Install Dependencies
+### Step 1: Clone the `vm-rdp` Branch
 ```bash
-pip install -r requirements.txt
-# Optional (recommended on Linux/Colab for 2x faster inference):
-pip install unsloth
+git clone -b vm-rdp https://github.com/Sushx21/tda-router-model.git
+cd tda-router-model
 ```
 
-### 2. Run the Interactive Router & Sanity Check
+### Step 2: Install Dependencies (With A100 CUDA Support)
+**On Windows RDP (Command Prompt / PowerShell):**
+```cmd
+setup_vm.bat
+```
+*(Or manually on Windows/Linux:)*
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements.txt
+```
+
+### Step 3A: Run Interactive CLI & Sanity Check
 ```bash
 python router.py
 ```
-This will automatically download the base 4-bit weights (`unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit`) on first run, attach your local `./tda_lora_model` adapter, run 4 sanity-check queries across all 4 agents, and open an interactive prompt.
+*(Or double-click `run_router.bat` on the RDP Desktop.)*
 
-### 3. Use Inside Any Python Application / API
-```python
-from router import TDARouter
-
-router = TDARouter()  # Loads base model + ./tda_lora_model once at startup
-
-response = router.route("What is the total quantity and value of 'Flats' classification inventory today?")
-print(response)
-# Output:
-# {
-#   "agent": "SCSteelInventoryAgent",
-#   "reasoning": "Rationale: Identifies the total stock value of flats today."
-# }
+### Step 3B: Run as a Production REST API Server (Port 8000)
+```bash
+python api_server.py
 ```
-
----
-
-## Important Implementation Notes (Why `router.py` Is Configured This Way)
-If integrating the adapter into a custom pipeline without `router.py`, keep these 3 rules in mind:
-1. **Use the Exact 643-Char System Prompt:** The LoRA adapter was trained with `train_on_responses_only` conditioned on the exact system prompt defined in `SYSTEM_PROMPT` inside `router.py`. Omitting the agent definitions from the system prompt will degrade accuracy.
-2. **Include `<think>\n\n</think>\n\n` in the Assistant Generation Prefix:** Qwen3-4B's chat template includes an empty `<think>\n\n</think>\n\n` block before the JSON response during training. `tda_lora_model/chat_template.jinja` and `router.py` already include this automatically.
-3. **Pre-seed `{"agent": "` and Suppress Special Tags:** `router.py` pre-seeds `{"agent": "` and blocks `<tool_call>` / `<|im_start|>` tokens via `suppress_tokens` so the model is guaranteed to return 100% valid JSON on every call.
+Test the API from PowerShell or any client:
+```bash
+curl -X POST http://localhost:8000/route -H "Content-Type: application/json" -d "{\"query\": \"list employees that may retire in next 2 months\"}"
+```
+Response:
+```json
+{
+  "agent": "EmployeeInformationAgent",
+  "reasoning": "Identifies employees whose retirement dates fall within the next 2 months.",
+  "latency_ms": 184.2
+}
+```

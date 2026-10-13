@@ -7,7 +7,7 @@
     "parent_library": "transformers.models.qwen3.modeling_qwen3",
     "unsloth_fixed": true
   },
-  "base_model_name_or_path": "unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit",
+  "base_model_name_or_path": "Qwen/Qwen3-4B-Instruct-2507",
   "bias": "none",
   "corda_config": null,
   "ensure_weight_tying": false,
